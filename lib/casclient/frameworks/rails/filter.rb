@@ -213,14 +213,14 @@ module CASClient
               
               log.debug "Intercepted single-sign-out request for CAS session #{si.inspect}."
               
-              required_sess_store = CGI::Session::ActiveRecordStore
-              current_sess_store  = ActionController::Base.session_options[:database_manager]
+              required_sess_store = (newer_rails?) ? ActiveRecord::SessionStore : CGI::Session::ActiveRecordStore
+              current_sess_store  = (newer_rails?) ? ActionController::Base.session_store : ActionController::Base.session_options[:database_manager]
               
               if current_sess_store == required_sess_store
                 session_id = read_service_session_lookup(si)
                 
                 if session_id
-                  session = CGI::Session::ActiveRecordStore::Session.find_by_session_id(session_id)
+                  session = current_sess_store::Session.find_by_session_id(session_id)
                   if session
                     session.destroy
                     log.debug("Destroyed #{session.inspect} for session #{session_id.inspect} corresponding to service ticket #{si.inspect}.")
@@ -245,6 +245,13 @@ module CASClient
             
             # This is not a single-sign-out request.
             return false
+          end
+
+          # Returns true if Rails is >= 2.3
+          # TODO: Fix namespace issues to gain reference to Rails class
+          def newer_rails?
+            #Rails::VERSION::MAJOR > 2 || (Rails::VERSION::MAJOR == 2 && Rails::VERSION::MINOR >= 3)
+            return true
           end
           
           def read_ticket(controller)
@@ -278,27 +285,21 @@ module CASClient
             return service_url
           end
           
-          # Creates a file in tmp/sessions linking a SessionTicket
-          # with the local Rails session id. The file is named
-          # cas_sess.<session ticket> and its text contents is the corresponding 
-          # Rails session id.
-          # Returns the filename of the lookup file created.
+          # Store the rails session_id in the Rails cache (using whichever 
+          # method is configured in the project's environment).  It uses the CAS
+          # service ticket for the key.
+          # Returns true, i think
           def store_service_session_lookup(st, sid)
             st = st.ticket if st.kind_of? ServiceTicket
-            f = File.new(filename_of_service_session_lookup(st), 'w')
-            f.write(sid)
-            f.close
-            return f.path
+            RAILS_CACHE.write(st, sid)
           end
           
           # Returns the local Rails session ID corresponding to the given
-          # ServiceTicket. This is done by reading the contents of the
-          # cas_sess.<session ticket> file created in a prior call to 
+          # ServiceTicket.
           # #store_service_session_lookup.
           def read_service_session_lookup(st)
             st = st.ticket if st.kind_of? ServiceTicket
-            ssl_filename = filename_of_service_session_lookup(st)
-            return File.exists?(ssl_filename) && IO.read(ssl_filename)
+            return RAILS_CACHE.read(st)
           end
           
           # Removes a stored relationship between a ServiceTicket and a local
@@ -308,8 +309,7 @@ module CASClient
           # See #store_service_session_lookup.
           def delete_service_session_lookup(st)
             st = st.ticket if st.kind_of? ServiceTicket
-            ssl_filename = filename_of_service_session_lookup(st)
-            File.delete(ssl_filename) if File.exists?(ssl_filename)
+            RAILS_CACHE.delete(st)
           end
           
           # Returns the path and filename of the service session lookup file.
